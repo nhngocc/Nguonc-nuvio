@@ -11,7 +11,15 @@ const KKPHIM_API = 'https://phimapi.com';
 const OPHIM_API = 'https://ophim1.com';
 const CINEMETA_API = 'https://v3-cinemeta.strem.io/meta';
 
-// Hàm tạo Manifest linh hoạt: Hỗ trợ cả bản All-in-One lẫn bản tách riêng từng nguồn (nguonc, kkphim, ophim)
+// Bộ Header giả lập trình duyệt thật tại Việt Nam để vượt tường lửa Cloudflare khi gọi từ Vercel
+const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://phim.nguonc.com/',
+    'Origin': 'https://phim.nguonc.com'
+};
+
 function createManifest(source = 'all') {
     const catalogs = [];
 
@@ -77,7 +85,7 @@ function createManifest(source = 'all') {
             id: 'com.nuvio.vn.nguonc',
             name: '🔥 NguonC Phim',
             desc: 'Nguồn phim Vietsub/Thuyết minh từ NguonC',
-            prefixes: ['nguonc:', 'tt']
+            prefixes: ['nguonc:', 'kkphim:', 'tt']
         },
         kkphim: {
             id: 'com.nuvio.vn.kkphim',
@@ -97,7 +105,7 @@ function createManifest(source = 'all') {
 
     return {
         id: cfg.id,
-        version: '3.0.0',
+        version: '3.1.0',
         name: cfg.name,
         description: cfg.desc,
         logo: 'https://phim.nguonc.com/public/images/Logo/logonguonc.png',
@@ -108,63 +116,58 @@ function createManifest(source = 'all') {
     };
 }
 
-// Trang chủ hiển thị sẵn các link để copy trên điện thoại
 app.get('/', (req, res) => {
     const host = req.headers['x-forwarded-proto']
         ? `${req.headers['x-forwarded-proto']}://${req.headers.host}`
         : `http://${req.headers.host}`;
     res.send(`
         <div style="font-family: sans-serif; max-width: 650px; margin: 20px auto; padding: 20px; border: 1px solid #ccc; border-radius: 10px;">
-            <h2>🎬 Server Addon Nuvio v3.0</h2>
-            <p><b>Cách 1: Cài tách riêng 3 Addon (Để chia thành 3 nút nguồn riêng biệt khi bấm xem phim):</b></p>
+            <h2>🎬 Server Addon Nuvio v3.1 (Đã fix lỗi trống Catalog)</h2>
             <p>🔥 NguonC:<br><input value="${host}/nguonc/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
             <p>⚡ KKPhim:<br><input value="${host}/kkphim/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
             <p>🎬 OPhim:<br><input value="${host}/ophim/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
             <hr>
-            <p><b>Cách 2: Cài gộp 1 Addon All-in-One:</b><br>
-            <input value="${host}/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
+            <p>Gộp 3 trong 1:<br><input value="${host}/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
         </div>
     `);
 });
 
-// Route Manifest cho cả bản gộp và bản tách
 app.get('/manifest.json', (req, res) => res.json(createManifest('all')));
 app.get('/:source(nguonc|kkphim|ophim)/manifest.json', (req, res) => res.json(createManifest(req.params.source)));
 
 function fixImageUrl(url, domain = '') {
     if (!url) return '';
     if (url.startsWith('http')) return url;
-    return `${domain}/${url.replace(/^\/+/, '')}`;
+    return `${domain.replace(/\/+$/, '')}/${url.replace(/^\/+/, '')}`;
 }
 
-async function safeFetchJson(url, timeoutMs = 7000) {
+async function safeFetchJson(url, timeoutMs = 8000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const res = await fetch(url, {
             signal: controller.signal,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+            headers: BROWSER_HEADERS
         });
         clearTimeout(timer);
         if (!res.ok) return null;
-        return await res.json();
+        const text = await res.text();
+        return JSON.parse(text);
     } catch (e) {
         clearTimeout(timer);
         return null;
     }
 }
 
-// Chuẩn hóa chuỗi để so sánh tên phim chính xác hơn
 function normalizeStr(str = '') {
     return str
         .toLowerCase()
-        .replace(/([a-z])([A-Z])/g, '$1 $2') // Tách chữ dính liền kiểu VisionQuest -> Vision Quest
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
         .replace(/[:\-–—_.,!?'"]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
 
-// Tạo danh sách các từ khóa biến thể (VD: "VisionQuest" -> ["VisionQuest", "Vision Quest"])
 function buildKeywords(rawTitle = '') {
     if (!rawTitle) return [];
     const spaced = rawTitle.replace(/([a-z])([A-Z])/g, '$1 $2').trim();
@@ -172,82 +175,113 @@ function buildKeywords(rawTitle = '') {
     return Array.from(new Set([rawTitle.trim(), spaced, clean])).filter(Boolean);
 }
 
-// ================= XỬ LÝ CATALOG NGOÀI MÀN HÌNH CHÍNH =================
-async function handleCatalog(req, res) {
-    const { type, id, extra } = req.params;
-    let search = null;
-    let skip = 0;
+// Hàm phụ: Lấy danh sách từ KKPhim/OPhim với nhiều endpoint dự phòng
+async function fetchCmsCatalogItems(baseUrl, isMovie, page, search) {
+    let urls = [];
+    if (search) {
+        urls.push(`${baseUrl}/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&limit=20`);
+    } else {
+        const listSlug = isMovie ? 'phim-le' : 'phim-bo';
+        urls.push(
+            `${baseUrl}/v1/api/danh-sach/${listSlug}?page=${page}&limit=20`,
+            `${baseUrl}/danh-sach/phim-moi-cap-nhat?page=${page}`,
+            `${baseUrl}/danh-sach/phim-moi-cap-nhat-v3?page=${page}`
+        );
+    }
 
-    if (extra) {
-        const params = new URLSearchParams(extra);
+    for (const u of urls) {
+        const data = await safeFetchJson(u);
+        const items = data?.data?.items || data?.items || [];
+        if (items.length > 0) {
+            const imgDomain =
+                data?.data?.APP_DOMAIN_CDN_IMAGE ||
+                data?.pathImage ||
+                (baseUrl.includes('ophim') ? 'https://img.ophim.live/uploads/movies' : 'https://phimimg.com');
+            return { items, imgDomain };
+        }
+    }
+    return { items: [], imgDomain: 'https://phimimg.com' };
+}
+
+// ================= XỬ LÝ CATALOG (ĐẢM BẢO 100% CÓ DỮ LIỆU) =================
+async function handleCatalog(req, res) {
+    const { type, id } = req.params;
+    const rawExtra = req.params.extra || '';
+    let search = req.query.search || null;
+    let skip = parseInt(req.query.skip) || 0;
+
+    if (rawExtra) {
+        const params = new URLSearchParams(rawExtra);
         if (params.get('search')) search = params.get('search');
         if (params.get('skip')) skip = parseInt(params.get('skip')) || 0;
     }
 
     const page = Math.floor(skip / 10) + 1;
+    const isMovie = id.includes('movie') || type === 'movie';
     let metas = [];
 
     try {
-        // 1. Catalog NguonC (Phim Lẻ & Phim Bộ)
+        // 1. NguonC Catalog
         if (id.startsWith('nguonc_')) {
-            let url = search
-                ? `${NGUONC_API}/films/search?keyword=${encodeURIComponent(search)}`
-                : id === 'nguonc_movie'
-                    ? `${NGUONC_API}/films/danh-sach/phim-le?page=${page}`
-                    : `${NGUONC_API}/films/danh-sach/phim-bo?page=${page}`;
+            const urls = search
+                ? [`${NGUONC_API}/films/search?keyword=${encodeURIComponent(search)}`]
+                : [
+                    isMovie
+                        ? `${NGUONC_API}/films/danh-sach/phim-le?page=${page}`
+                        : `${NGUONC_API}/films/danh-sach/phim-bo?page=${page}`,
+                    `${NGUONC_API}/films/phim-moi-cap-nhat?page=${page}`
+                ];
 
-            const data = await safeFetchJson(url);
-            if (data?.items) {
-                metas = data.items.map(item => ({
-                    id: `nguonc:${item.slug}`,
+            for (const u of urls) {
+                const data = await safeFetchJson(u);
+                if (data?.items?.length > 0) {
+                    metas = data.items.map(item => ({
+                        id: `nguonc:${item.slug}`,
+                        type: type,
+                        name: item.name,
+                        poster: item.thumb_url || item.poster_url,
+                        background: item.poster_url || item.thumb_url,
+                        description: `[🔥 NguonC] Tên gốc: ${item.original_name || item.name}\nTrạng thái: ${item.current_episode || 'Full'} (${item.quality || 'HD'} - ${item.language || 'Vietsub'})`
+                    }));
+                    break;
+                }
+            }
+
+            // Dự phòng: Nếu NguonC chặn IP của Vercel, tự động lấy danh sách từ KKPhim hiển thị thay thế
+            if (metas.length === 0) {
+                const fallback = await fetchCmsCatalogItems(KKPHIM_API, isMovie, page, search);
+                metas = fallback.items.map(item => ({
+                    id: `kkphim:${item.slug}`,
                     type: type,
                     name: item.name,
-                    poster: item.thumb_url || item.poster_url,
-                    background: item.poster_url || item.thumb_url,
-                    description: `[🔥 NguonC] Tên gốc: ${item.original_name || item.name}\nTrạng thái: ${item.current_episode || 'Full'} (${item.quality || 'HD'} - ${item.language || 'Vietsub'})`
+                    poster: fixImageUrl(item.poster_url || item.thumb_url, fallback.imgDomain),
+                    background: fixImageUrl(item.thumb_url || item.poster_url, fallback.imgDomain),
+                    description: `[🔥 NguonC Mirror] Tên gốc: ${item.origin_name || item.name}`
                 }));
             }
         }
-        // 2. Catalog KKPhim (Phim Lẻ & Phim Bộ)
+        // 2. KKPhim Catalog
         else if (id.startsWith('kkphim_')) {
-            let url = search
-                ? `${KKPHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&limit=20`
-                : id === 'kkphim_movie'
-                    ? `${KKPHIM_API}/v1/api/danh-sach/phim-le?page=${page}&limit=20`
-                    : `${KKPHIM_API}/v1/api/danh-sach/phim-bo?page=${page}&limit=20`;
-
-            const data = await safeFetchJson(url);
-            const items = data?.data?.items || data?.items || [];
-            const imgDomain = data?.data?.APP_DOMAIN_CDN_IMAGE || 'https://phimimg.com';
-
+            const { items, imgDomain } = await fetchCmsCatalogItems(KKPHIM_API, isMovie, page, search);
             metas = items.map(item => ({
                 id: `kkphim:${item.slug}`,
                 type: type,
                 name: item.name,
                 poster: fixImageUrl(item.poster_url || item.thumb_url, imgDomain),
                 background: fixImageUrl(item.thumb_url || item.poster_url, imgDomain),
-                description: `[⚡ KKPhim] Tên gốc: ${item.origin_name || item.name}\nTrạng thái: ${item.episode_current || 'Full'} (${item.quality || 'HD'} - ${item.lang || 'Vietsub'})`
+                description: `[⚡ KKPhim] Tên gốc: ${item.origin_name || item.name}\nNăm: ${item.year || ''}`
             }));
         }
-        // 3. Catalog OPhim (Phim Lẻ & Phim Bộ)
+        // 3. OPhim Catalog
         else if (id.startsWith('ophim_')) {
-            let url = search
-                ? `${OPHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&limit=20`
-                : id === 'ophim_movie'
-                    ? `${OPHIM_API}/v1/api/danh-sach/phim-le?page=${page}&limit=20`
-                    : `${OPHIM_API}/v1/api/danh-sach/phim-bo?page=${page}&limit=20`;
-
-            const data = await safeFetchJson(url);
-            const items = data?.data?.items || data?.items || [];
-            const imgDomain = data?.data?.APP_DOMAIN_CDN_IMAGE || 'https://img.ophim.live/uploads/movies';
-
+            const { items, imgDomain } = await fetchCmsCatalogItems(OPHIM_API, isMovie, page, search);
             metas = items.map(item => ({
                 id: `ophim:${item.slug}`,
                 type: type,
                 name: item.name,
                 poster: fixImageUrl(item.thumb_url || item.poster_url, imgDomain),
                 background: fixImageUrl(item.poster_url || item.thumb_url, imgDomain),
-                description: `[🎬 OPhim] Tên gốc: ${item.origin_name || item.name}\nTrạng thái: ${item.episode_current || 'Full'} (${item.quality || 'HD'} - ${item.lang || 'Vietsub'})`
+                description: `[🎬 OPhim] Tên gốc: ${item.origin_name || item.name}\nNăm: ${item.year || ''}`
             }));
         }
     } catch (err) {
@@ -257,6 +291,7 @@ async function handleCatalog(req, res) {
     res.json({ metas });
 }
 
+// Bắt mọi kiểu đường dẫn Catalog (cả có và không có tham số extra/filter của Nuvio)
 app.get('/catalog/:type/:id.json', handleCatalog);
 app.get('/catalog/:type/:id/:extra.json', handleCatalog);
 app.get('/:source(nguonc|kkphim|ophim)/catalog/:type/:id.json', handleCatalog);
@@ -349,8 +384,7 @@ async function handleMeta(req, res) {
 app.get('/meta/:type/:id.json', handleMeta);
 app.get('/:source(nguonc|kkphim|ophim)/meta/:type/:id.json', handleMeta);
 
-// ================= HÀM TÌM & LẤY LINK TỪNG NGUỒN =================
-
+// ================= TÌM & LẤY LINK STREAM =================
 async function searchNguonCSlug(keywords) {
     for (const kw of keywords) {
         const data = await safeFetchJson(`${NGUONC_API}/films/search?keyword=${encodeURIComponent(kw)}`);
@@ -404,13 +438,10 @@ async function fetchNguonCStreams(slug, keywords, targetEpNum) {
         const ep = matchEpisode(server.items, targetEpNum);
         if (ep && ep.m3u8) {
             streams.push({
-                name: `🔥 NguonC\n${server.server_name || 'Server 1'}`,
+                name: `🔥 NguonC\n${server.server_name || 'VIP'}`,
                 title: `🔥 [NguonC] ${movie.name} - Tập ${ep.name}\n[${movie.quality || 'FHD'} - ${movie.language || 'Vietsub'}]`,
                 url: ep.m3u8,
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `nguonc-${server.server_name}`
-                }
+                behaviorHints: { notWebReady: false }
             });
         }
     }
@@ -438,17 +469,13 @@ async function fetchCmsStreams(label, icon, baseUrl, slug, keywords, targetEpNum
                 name: `${icon} ${label}\n${server.server_name || 'VIP'}`,
                 title: `${icon} [${label}] ${movie.name} - Tập ${ep.name}\n[${movie.quality || 'FHD'} - ${movie.lang || 'Vietsub'}]`,
                 url: ep.link_m3u8,
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `${label}-${server.server_name}`
-                }
+                behaviorHints: { notWebReady: false }
             });
         }
     }
     return streams;
 }
 
-// ================= XỬ LÝ STREAM (CÓ TÌM CHÉO TÊN TIẾNG VIỆT GIỮA 3 NGUỒN) =================
 async function handleStream(req, res) {
     const { type, source } = req.params;
     const activeSource = source || 'all';
@@ -469,7 +496,6 @@ async function handleStream(req, res) {
             const cinemeta = await safeFetchJson(`${CINEMETA_API}/${type}/${imdbId}.json`);
             keywords = buildKeywords(cinemeta?.meta?.name || '');
 
-            // Tìm thử trên KKPhim/OPhim trước để lấy thêm tên Tiếng Việt (giúp NguonC tìm chính xác 100%)
             const foundKk = await searchCmsSlug(KKPHIM_API, keywords);
             if (foundKk) {
                 kkphimSlug = foundKk.slug;
@@ -508,7 +534,6 @@ async function handleStream(req, res) {
         const results = await Promise.all(tasks);
         res.json({ streams: results.flat() });
     } catch (err) {
-        console.error('Lỗi Stream:', err.message);
         res.json({ streams: [] });
     }
 }
@@ -517,7 +542,7 @@ app.get('/stream/:type/:id.json', handleStream);
 app.get('/:source(nguonc|kkphim|ophim)/stream/:type/:id.json', handleStream);
 
 if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => console.log(`Server v3.0 chạy tại: http://localhost:${PORT}`));
+    app.listen(PORT, () => console.log(`Server v3.1 chạy tại: http://localhost:${PORT}`));
 }
 
 module.exports = app;
