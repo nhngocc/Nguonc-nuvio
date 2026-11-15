@@ -1,15 +1,20 @@
 const NGUONC_API = 'https://phim.nguonc.com/api';
 const CINEMETA_API = 'https://v3-cinemeta.strem.io/meta';
+const KITSU_API = 'https://anime-kitsu.strem.fun/meta';
 
 const manifest = {
-    id: 'com.nuvio.nguonc.native',
-    version: '4.1.0',
-    name: '🔥 NguonC Phim (Fast)',
-    description: 'Addon xem phim Vietsub/Thuyết minh từ phim.nguonc.com cho Nuvio',
+    id: 'com.nuvio.nguonc.only',
+    version: '5.2.0',
+    name: '🔥 NguonC Phim (Cloudflare)',
+    description: 'Addon thuần NguonC (Vietsub / Thuyết minh / Lồng tiếng) cho Nuvio',
     logo: 'https://phim.nguonc.com/public/images/Logo/logonguonc.png',
-    resources: ['catalog', 'meta', 'stream'],
+    resources: [
+        'catalog',
+        { name: 'meta', types: ['movie', 'series'], idPrefixes: ['nguonc:'] },
+        { name: 'stream', types: ['movie', 'series', 'anime'], idPrefixes: ['nguonc:', 'tt', 'tmdb:', 'kitsu:'] }
+    ],
     types: ['movie', 'series'],
-    idPrefixes: ['nguonc:', 'tt'],
+    idPrefixes: ['nguonc:', 'tt', 'tmdb:', 'kitsu:'],
     catalogs: [
         {
             type: 'movie',
@@ -21,249 +26,298 @@ const manifest = {
             type: 'movie',
             id: 'nguonc_phim_le',
             name: '🔥 NguonC - Phim Lẻ',
-            extra: [{ name: 'skip', isRequired: false }]
+            extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
         },
         {
             type: 'series',
             id: 'nguonc_phim_bo',
             name: '🔥 NguonC - Phim Bộ',
             extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+        },
+        {
+            type: 'series',
+            id: 'nguonc_hoat_hinh',
+            name: '🔥 NguonC - Hoạt Hình / Anime',
+            extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
         }
     ]
 };
 
-// Hàm gọi 1 URL với timeout ngắn (3.5 giây)
-async function fetchWithTimeout(url, timeoutMs = 3500) {
+function jsonResponse(data) {
+    return new Response(JSON.stringify(data), {
+        headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': '*'
+        }
+    });
+}
+
+async function fetchJson(targetUrl, timeoutMs = 5000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const res = await fetch(url, {
+        const res = await fetch(targetUrl, {
             signal: controller.signal,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'application/json, text/plain, */*'
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Referer': 'https://phim.nguonc.com/'
             }
         });
         clearTimeout(timer);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const text = await res.text();
-        if (!text || text.trim().startsWith('<')) throw new Error('Blocked HTML');
-        const parsed = JSON.parse(text);
-        if (parsed && typeof parsed.contents === 'string') return JSON.parse(parsed.contents);
-        if (parsed) return parsed;
-        throw new Error('Empty');
+        if (!res.ok) return null;
+        return await res.json();
     } catch (e) {
         clearTimeout(timer);
-        throw e;
-    }
-}
-
-// Chạy đua song song cả 3 đường truyền cùng lúc (Trả kết quả trong ~1-2 giây)
-async function fetchNguonC(endpoint) {
-    const targetUrl = `${NGUONC_API}${endpoint}`;
-    const raceUrls = [
-        fetchWithTimeout(targetUrl, 3000),
-        fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, 4000),
-        fetchWithTimeout(`https://corsproxy.io/?${encodeURIComponent(targetUrl)}`, 4000)
-    ];
-
-    try {
-        return await Promise.any(raceUrls);
-    } catch (e) {
         return null;
     }
 }
 
-function sendJson(res, data) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.statusCode = 200;
-    res.end(JSON.stringify(data));
+async function fetchNguonC(endpoint) {
+    return await fetchJson(`${NGUONC_API}${endpoint}`);
 }
 
-module.exports = async (req, res) => {
-    if (req.method === 'OPTIONS') {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', '*');
-        res.statusCode = 204;
-        return res.end();
+// Tạo các biến thể từ khóa để bộ tìm kiếm của NguonC dễ bắt trúng nhất
+function generateSearchKeywords(rawTitle = '') {
+    if (!rawTitle) return [];
+    const spaced = rawTitle.replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+    const beforeColon = spaced.split(/[:\-–—]/)[0].trim();
+    const cleanWords = beforeColon.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const first3Words = cleanWords.split(' ').slice(0, 3).join(' ');
+
+    return Array.from(new Set([
+        rawTitle.trim(),
+        spaced,
+        beforeColon,
+        cleanWords,
+        first3Words
+    ])).filter(k => k && k.length >= 2);
+}
+
+// Dịch mã IMDb / TMDB / Kitsu sang danh sách từ khóa (Cả Tiếng Anh + Tiếng Việt)
+async function resolveKeywordsAndEpisode(type, rawId) {
+    const parts = rawId.split(':');
+    const prefix = parts[0];
+    let titles = [];
+    let epNum = null;
+
+    if (prefix.startsWith('tt')) {
+        const imdbId = parts[0];
+        epNum = parts[2] ? parseInt(parts[2]) : (type !== 'movie' ? 1 : null);
+        const cine = await fetchJson(`${CINEMETA_API}/${type}/${imdbId}.json`);
+        if (cine?.meta?.name) titles.push(cine.meta.name);
+    } else if (prefix === 'kitsu') {
+        const kitsuId = parts[1];
+        epNum = parts[2] ? parseInt(parts[2]) : 1;
+        const kitsu = await fetchJson(`${KITSU_API}/anime/kitsu:${kitsuId}.json`);
+        if (kitsu?.meta?.name) titles.push(kitsu.meta.name);
+        if (Array.isArray(kitsu?.meta?.aliases)) titles.push(...kitsu.meta.aliases.slice(0, 2));
+    } else if (prefix === 'tmdb') {
+        const tmdbId = parts[1];
+        epNum = parts[3] ? parseInt(parts[3]) : (parts[2] ? parseInt(parts[2]) : (type !== 'movie' ? 1 : null));
+        const tmdb = await fetchJson(`https://94c8cb9f702d-tmdb-addon.baby-beamup.club/meta/${type}/tmdb:${tmdbId}.json`);
+        if (tmdb?.meta?.name) titles.push(tmdb.meta.name);
     }
 
-    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const pathname = decodeURIComponent(parsedUrl.pathname);
-
-    if (pathname === '/' || pathname === '') {
-        const host = req.headers['x-forwarded-proto']
-            ? `${req.headers['x-forwarded-proto']}://${req.headers.host}`
-            : `http://${req.headers.host}`;
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.statusCode = 200;
-        return res.end(`
-            <div style="font-family: sans-serif; max-width: 600px; margin: 30px auto; padding: 20px; border: 1px solid #ccc; border-radius: 10px;">
-                <h2>🔥 NguonC Addon (v4.1 Fast Race)</h2>
-                <p>Link Manifest cài đặt cho Nuvio:</p>
-                <input value="${host}/manifest.json" style="width:100%;padding:10px;font-size:16px;" readonly onclick="this.select()">
-            </div>
-        `);
+    const allKeywords = [];
+    for (const t of titles) {
+        allKeywords.push(...generateSearchKeywords(t));
     }
+    return { keywords: Array.from(new Set(allKeywords)), epNum };
+}
 
-    if (pathname === '/manifest.json') {
-        return sendJson(res, manifest);
-    }
+export default {
+    async fetch(request) {
+        if (request.method === 'OPTIONS') return jsonResponse({});
 
-    // ================= CATALOG =================
-    if (pathname.startsWith('/catalog/')) {
-        const cleanPath = pathname.replace('/catalog/', '').replace(/\.json$/, '');
-        const parts = cleanPath.split('/');
-        const type = parts[0];
-        const id = parts[1];
-        const extra = parts[2] || '';
+        const url = new URL(request.url);
+        const pathname = decodeURIComponent(url.pathname);
 
-        let search = parsedUrl.searchParams.get('search') || null;
-        let skip = parseInt(parsedUrl.searchParams.get('skip')) || 0;
-
-        if (extra) {
-            const p = new URLSearchParams(extra);
-            if (p.get('search')) search = p.get('search');
-            if (p.get('skip')) skip = parseInt(p.get('skip')) || 0;
+        if (pathname === '/' || pathname === '') {
+            return new Response(`
+                <div style="font-family:sans-serif;max-width:600px;margin:30px auto;padding:20px;border:1px solid #ccc;border-radius:10px;">
+                    <h2>🔥 NguonC Addon (v5.2 - Thuần NguonC)</h2>
+                    <p>Copy link Manifest dưới đây dán vào Nuvio:</p>
+                    <input value="${url.origin}/manifest.json" style="width:100%;padding:10px;font-size:16px;" readonly onclick="this.select()">
+                </div>
+            `, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
         }
 
-        const page = Math.floor(skip / 10) + 1;
-        let endpoint = `/films/phim-moi-cap-nhat?page=${page}`;
-        if (search) endpoint = `/films/search?keyword=${encodeURIComponent(search)}`;
-        else if (id === 'nguonc_phim_le') endpoint = `/films/danh-sach/phim-le?page=${page}`;
-        else if (id === 'nguonc_phim_bo') endpoint = `/films/danh-sach/phim-bo?page=${page}`;
+        if (pathname === '/manifest.json') {
+            return jsonResponse(manifest);
+        }
 
-        const data = await fetchNguonC(endpoint);
-        const items = data?.items || [];
-        const metas = items.map(item => ({
-            id: `nguonc:${item.slug}`,
-            type: type,
-            name: item.name,
-            poster: item.thumb_url || item.poster_url,
-            background: item.poster_url || item.thumb_url,
-            description: `[🔥 NguonC] ${item.original_name || item.name} - ${item.current_episode || 'Full'} (${item.quality || 'HD'})`,
-            releaseInfo: item.created ? item.created.substring(0, 4) : ''
-        }));
+        // ================= 1. CATALOG =================
+        if (pathname.startsWith('/catalog/')) {
+            const parts = pathname.replace('/catalog/', '').replace(/\.json$/, '').split('/');
+            const type = parts[0];
+            const id = parts[1];
+            const extra = parts.slice(2).join('/');
 
-        return sendJson(res, { metas });
-    }
+            let search = url.searchParams.get('search') || null;
+            let skip = parseInt(url.searchParams.get('skip')) || 0;
+            if (extra) {
+                const p = new URLSearchParams(extra);
+                if (p.get('search')) search = p.get('search');
+                if (p.get('skip')) skip = parseInt(p.get('skip')) || 0;
+            }
 
-    // ================= META =================
-    if (pathname.startsWith('/meta/')) {
-        const cleanPath = pathname.replace('/meta/', '').replace(/\.json$/, '');
-        const [type, rawId] = cleanPath.split('/');
-        if (!rawId || !rawId.startsWith('nguonc:')) return sendJson(res, { meta: null });
+            const page = Math.floor(skip / 10) + 1;
+            let endpoint = `/films/phim-moi-cap-nhat?page=${page}`;
+            if (search) endpoint = `/films/search?keyword=${encodeURIComponent(search)}`;
+            else if (id === 'nguonc_phim_le') endpoint = `/films/danh-sach/phim-le?page=${page}`;
+            else if (id === 'nguonc_phim_bo') endpoint = `/films/danh-sach/phim-bo?page=${page}`;
+            else if (id === 'nguonc_hoat_hinh') endpoint = `/films/the-loai/hoat-hinh?page=${page}`;
 
-        const slug = rawId.replace('nguonc:', '');
-        const data = await fetchNguonC(`/film/${slug}`);
-        const movie = data?.movie;
-        if (!movie) return sendJson(res, { meta: null });
+            const data = await fetchNguonC(endpoint);
+            const metas = (data?.items || []).map(item => ({
+                id: `nguonc:${item.slug}`,
+                type: type,
+                name: item.name,
+                poster: item.thumb_url || item.poster_url,
+                background: item.poster_url || item.thumb_url,
+                description: `[🔥 NguonC] Tên gốc: ${item.original_name || item.name}\nTrạng thái: ${item.current_episode || 'Full'} (${item.quality || 'FHD'} - ${item.language || 'Vietsub'})`
+            }));
 
-        const meta = {
-            id: `nguonc:${movie.slug}`,
-            type: type,
-            name: movie.name,
-            poster: movie.thumb_url,
-            background: movie.poster_url || movie.thumb_url,
-            description: `${movie.description || ''}\n\nChất lượng: ${movie.quality || 'HD'} - ${movie.language || 'Vietsub'}`,
-            releaseInfo: movie.current_episode || ''
-        };
+            return jsonResponse({ metas });
+        }
 
-        if (type === 'series' && movie.episodes?.length > 0) {
+        // ================= 2. META (SỬA LỖI BẤM XEM TỪ CATALOG) =================
+        if (pathname.startsWith('/meta/')) {
+            const clean = pathname.replace('/meta/', '').replace(/\.json$/, '');
+            const slashIdx = clean.indexOf('/');
+            if (slashIdx === -1) return jsonResponse({ meta: null });
+
+            const type = clean.substring(0, slashIdx);
+            const rawId = decodeURIComponent(clean.substring(slashIdx + 1));
+
+            if (!rawId.startsWith('nguonc:')) return jsonResponse({ meta: null });
+
+            const slug = rawId.replace('nguonc:', '').split(':')[0];
+            const data = await fetchNguonC(`/film/${slug}`);
+            const movie = data?.movie;
+            if (!movie) return jsonResponse({ meta: null });
+
+            // Gộp tất cả các tập từ các server của NguonC
             const epMap = new Map();
-            movie.episodes.forEach(server => {
+            (movie.episodes || []).forEach(server => {
                 (server.items || []).forEach((ep, idx) => {
                     const epNum = idx + 1;
                     if (!epMap.has(epNum)) {
                         epMap.set(epNum, {
                             id: `nguonc:${movie.slug}:${epNum}`,
-                            title: `Tập ${ep.name}`,
+                            title: ep.name ? `Tập ${ep.name}` : `Tập ${epNum}`,
                             season: 1,
                             episode: epNum
                         });
                     }
                 });
             });
-            meta.videos = Array.from(epMap.values());
+
+            const videos = Array.from(epMap.values());
+
+            const meta = {
+                id: `nguonc:${movie.slug}`,
+                type: type,
+                name: movie.name,
+                poster: movie.thumb_url || movie.poster_url,
+                background: movie.poster_url || movie.thumb_url,
+                description: `${(movie.description || '').replace(/<[^>]*>?/gm, '')}\n\nTên gốc: ${movie.original_name || ''}\nĐạo diễn: ${movie.director || 'Đang cập nhật'}\nDiễn viên: ${movie.casts || 'Đang cập nhật'}\nChất lượng: ${movie.quality || 'FHD'} - ${movie.language || 'Vietsub'}`,
+                releaseInfo: movie.current_episode || ''
+            };
+
+            // Nếu là Phim Bộ (hoặc Phim Lẻ có nhiều phần), trả về danh sách tập; nếu là Phim Lẻ 1 tập, gắn defaultVideoId để Nuvio gọi thẳng Stream
+            if (type === 'series' || videos.length > 1) {
+                meta.videos = videos.length > 0 ? videos : [{
+                    id: `nguonc:${movie.slug}:1`,
+                    title: 'Full',
+                    season: 1,
+                    episode: 1
+                }];
+            } else {
+                meta.behaviorHints = {
+                    defaultVideoId: `nguonc:${movie.slug}:1`
+                };
+            }
+
+            return jsonResponse({ meta });
         }
 
-        return sendJson(res, { meta });
-    }
+        // ================= 3. STREAM (LẤY LINK M3U8 TỪ NGUONC) =================
+        if (pathname.startsWith('/stream/')) {
+            const clean = pathname.replace('/stream/', '').replace(/\.json$/, '');
+            const slashIdx = clean.indexOf('/');
+            if (slashIdx === -1) return jsonResponse({ streams: [] });
 
-    // ================= STREAM =================
-    if (pathname.startsWith('/stream/')) {
-        const cleanPath = pathname.replace('/stream/', '').replace(/\.json$/, '');
-        const [type, rawId] = cleanPath.split('/');
-        if (!rawId) return sendJson(res, { streams: [] });
+            const type = clean.substring(0, slashIdx);
+            const rawId = decodeURIComponent(clean.substring(slashIdx + 1));
+            const parts = rawId.split(':');
+            const prefix = parts[0];
 
-        const parts = rawId.split(':');
-        const prefix = parts[0];
-
-        try {
-            let slug = '';
+            let slug = null;
             let targetEpNum = null;
 
+            // Trường hợp 1: Bấm trực tiếp từ Catalog của NguonC (VD: nguonc:phai-song hoặc nguonc:phai-song:1)
             if (prefix === 'nguonc') {
                 slug = parts[1];
-                targetEpNum = parts[2] ? parseInt(parts[2]) : (type === 'series' ? 1 : null);
-            } else if (prefix.startsWith('tt')) {
-                const imdbId = parts[0];
-                targetEpNum = parts[2] ? parseInt(parts[2]) : (type === 'series' ? 1 : null);
+                targetEpNum = parts[2] ? parseInt(parts[2]) : 1;
+            }
+            // Trường hợp 2: Bấm từ phim ngoài màn hình chính Nuvio (tt..., tmdb:..., kitsu:...)
+            else {
+                const resolved = await resolveKeywordsAndEpisode(type, rawId);
+                targetEpNum = resolved.epNum;
 
-                const metaData = await fetchWithTimeout(`${CINEMETA_API}/${type}/${imdbId}.json`, 3000);
-                const fullName = metaData?.meta?.name || '';
-                if (!fullName) return sendJson(res, { streams: [] });
-
-                // Cắt bỏ phần phụ sau dấu ':' hoặc '-' (VD: "Dragon Ball Super: Beerus" -> "Dragon Ball Super")
-                const shortName = fullName.split(/[:\-–]/)[0].trim();
-                const keywords = Array.from(new Set([fullName, shortName]));
-
-                for (const kw of keywords) {
+                for (const kw of resolved.keywords) {
                     const searchData = await fetchNguonC(`/films/search?keyword=${encodeURIComponent(kw)}`);
                     if (searchData?.items?.length > 0) {
-                        slug = searchData.items[0].slug;
+                        const normKw = kw.toLowerCase();
+                        const matched = searchData.items.find(i =>
+                            (i.original_name || '').toLowerCase().includes(normKw) ||
+                            (i.name || '').toLowerCase().includes(normKw)
+                        ) || searchData.items[0];
+                        slug = matched.slug;
                         break;
                     }
                 }
             }
 
-            if (!slug) return sendJson(res, { streams: [] });
+            if (!slug) return jsonResponse({ streams: [] });
 
-            const detailData = await fetchNguonC(`/film/${slug}`);
-            const movie = detailData?.movie;
-            if (!movie || !movie.episodes) return sendJson(res, { streams: [] });
+            const detail = await fetchNguonC(`/film/${slug}`);
+            const movie = detail?.movie;
+            if (!movie || !Array.isArray(movie.episodes)) return jsonResponse({ streams: [] });
 
             const streams = [];
             for (const server of movie.episodes) {
                 const items = server.items || [];
+                if (items.length === 0) continue;
+
                 let ep = items[0];
-                if (targetEpNum !== null) {
+                if (targetEpNum !== null && items.length > 1) {
                     ep = items.find((item, idx) => {
-                        const num = parseInt((item.name || '').replace(/\D/g, ''));
+                        const num = parseInt((item.name || item.slug || '').replace(/\D/g, ''));
                         return num === targetEpNum || (idx + 1) === targetEpNum;
-                    }) || items[targetEpNum - 1];
+                    }) || items[targetEpNum - 1] || items[0];
                 }
 
                 if (ep && ep.m3u8) {
                     streams.push({
                         name: `🔥 NguonC\n${server.server_name || 'VIP'}`,
-                        title: `🔥 [NguonC] ${movie.name} - Tập ${ep.name}\n[${movie.quality || 'FHD'} - ${movie.language || 'Vietsub'}]`,
+                        title: `${movie.name} - Tập ${ep.name || 'Full'}\n[${movie.quality || 'FHD'} • ${movie.language || 'Vietsub'}]`,
                         url: ep.m3u8,
-                        behaviorHints: { notWebReady: false }
+                        behaviorHints: {
+                            notWebReady: false,
+                            bingeGroup: `nguonc-${server.server_name || 'vip'}`
+                        }
                     });
                 }
             }
 
-            return sendJson(res, { streams });
-        } catch (err) {
-            return sendJson(res, { streams: [] });
+            return jsonResponse({ streams });
         }
-    }
 
-    res.statusCode = 404;
-    res.end('Not Found');
+        return new Response('Not Found', { status: 404 });
+    }
 };
