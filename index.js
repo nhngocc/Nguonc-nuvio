@@ -8,7 +8,7 @@ app.use(cors());
 
 const NGUONC_API = 'https://phim.nguonc.com/api';
 const KKPHIM_API = 'https://phimapi.com';
-const OPHIM_API = 'https://ophim1.com';
+const OPHIM_APIS = ['https://ophim1.com', 'https://ophim17.cc', 'https://ophim1.cc'];
 const CINEMETA_API = 'https://v3-cinemeta.strem.io/meta';
 
 function createManifest(source = 'all') {
@@ -76,7 +76,7 @@ function createManifest(source = 'all') {
             id: 'com.nuvio.vn.nguonc',
             name: '🔥 NguonC Phim',
             desc: 'Nguồn phim Vietsub/Thuyết minh từ NguonC',
-            prefixes: ['nguonc:', 'tt']
+            prefixes: ['nguonc:', 'kkphim:', 'tt']
         },
         kkphim: {
             id: 'com.nuvio.vn.kkphim',
@@ -96,7 +96,7 @@ function createManifest(source = 'all') {
 
     return {
         id: cfg.id,
-        version: '3.2.0',
+        version: '3.3.0',
         name: cfg.name,
         description: cfg.desc,
         logo: 'https://phim.nguonc.com/public/images/Logo/logonguonc.png',
@@ -107,59 +107,86 @@ function createManifest(source = 'all') {
     };
 }
 
-// Hàm tải JSON thông minh: Tự động dùng Proxy vượt tường lửa nếu NguonC chặn IP của Vercel
-async function safeFetchJson(url, timeoutMs = 8000) {
-    const isNguonC = url.includes('nguonc.com');
-
-    // Danh sách đường dẫn thử nghiệm (Trực tiếp -> Proxy 1 -> Proxy 2 nếu là NguonC)
-    const urlsToTry = isNguonC
-        ? [
-            url,
-            `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-            `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
-        ]
-        : [url];
-
-    for (const targetUrl of urlsToTry) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        try {
-            const headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+// Hàm tải 1 URL đơn lẻ có kiểm tra JSON hợp lệ
+async function fetchSingleJson(targetUrl, timeoutMs = 4500, extraHeaders = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(targetUrl, {
+            signal: controller.signal,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
                 'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
-            };
-
-            if (targetUrl === url && isNguonC) {
-                headers['Referer'] = 'https://phim.nguonc.com/';
+                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+                ...extraHeaders
             }
+        });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (!text || text.trim().startsWith('<')) throw new Error('HTML blocked');
 
-            const res = await fetch(targetUrl, { signal: controller.signal, headers });
-            clearTimeout(timer);
-
-            if (!res.ok) continue;
-
-            const text = await res.text();
-            if (!text || text.trim().startsWith('<')) continue; // Bỏ qua nếu trả về trang HTML chặn của Cloudflare
-
-            const json = JSON.parse(text);
-            if (json) return json;
-        } catch (e) {
-            clearTimeout(timer);
+        const parsed = JSON.parse(text);
+        // Nếu dùng allorigins/get thì dữ liệu nằm trong parsed.contents
+        if (parsed && typeof parsed.contents === 'string') {
+            const inner = JSON.parse(parsed.contents);
+            if (inner) return inner;
         }
+        if (parsed) return parsed;
+        throw new Error('Empty JSON');
+    } catch (err) {
+        clearTimeout(timer);
+        throw err;
     }
-    return null;
 }
 
-// Trang chủ + Nút kiểm tra kết nối NguonC
+// Hàm tải thông minh: Chạy đua song song nhiều cổng Proxy cùng lúc để lấy kết quả nhanh nhất (< 3 giây)
+async function safeFetchJson(url, timeoutMs = 4500) {
+    const isNguonC = url.includes('nguonc.com');
+
+    if (!isNguonC) {
+        try {
+            return await fetchSingleJson(url, timeoutMs);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Chạy đua đồng thời 4 đường truyền để vượt tường lửa NguonC mà không bị timeout trên Vercel
+    const candidates = [
+        fetchSingleJson(url, 3500, { 'Referer': 'https://phim.nguonc.com/' }),
+        fetchSingleJson(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, 4500),
+        fetchSingleJson(`https://corsproxy.io/?${encodeURIComponent(url)}`, 4500),
+        fetchSingleJson(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, 4500)
+    ];
+
+    try {
+        return await Promise.any(candidates);
+    } catch (e) {
+        return null;
+    }
+}
+
+// Hàm gọi OPhim tự động thử các tên miền dự phòng
+async function fetchOPhimJson(pathWithSlash) {
+    const candidates = OPHIM_APIS.map(domain =>
+        fetchSingleJson(`${domain}${pathWithSlash}`, 4500)
+    );
+    try {
+        return await Promise.any(candidates);
+    } catch (e) {
+        return null;
+    }
+}
+
 app.get('/', (req, res) => {
     const host = req.headers['x-forwarded-proto']
         ? `${req.headers['x-forwarded-proto']}://${req.headers.host}`
         : `http://${req.headers.host}`;
     res.send(`
         <div style="font-family: sans-serif; max-width: 650px; margin: 20px auto; padding: 20px; border: 1px solid #ccc; border-radius: 10px;">
-            <h2>🎬 Server Addon Nuvio v3.2 (Bypass Cloudflare NguonC)</h2>
-            <p><a href="/debug" target="_blank" style="color: white; background: #e63946; padding: 8px 14px; text-decoration: none; border-radius: 5px; display: inline-block;">🔍 Bấm vào đây để kiểm tra kết nối NguonC / KKPhim / OPhim</a></p>
+            <h2>🎬 Server Addon Nuvio v3.3 (Fast Race Mode)</h2>
+            <p><a href="/debug" target="_blank" style="color: white; background: #2a9d8f; padding: 10px 16px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold;">🔍 Bấm kiểm tra lại /debug (v3.3)</a></p>
             <hr>
             <p>🔥 NguonC:<br><input value="${host}/nguonc/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
             <p>⚡ KKPhim:<br><input value="${host}/kkphim/manifest.json" style="width:100%;padding:8px;" readonly onclick="this.select()"></p>
@@ -170,23 +197,30 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Endpoint kiểm tra trực tiếp xem NguonC có trả về phim hay không
+// Endpoint kiểm tra kết nối cả 3 nguồn
 app.get('/debug', async (req, res) => {
     const [nguonc, kkphim, ophim] = await Promise.all([
         safeFetchJson(`${NGUONC_API}/films/phim-moi-cap-nhat?page=1`),
         safeFetchJson(`${KKPHIM_API}/danh-sach/phim-moi-cap-nhat?page=1`),
-        safeFetchJson(`${OPHIM_API}/danh-sach/phim-moi-cap-nhat?page=1`)
+        fetchOPhimJson(`/v1/api/danh-sach/phim-moi-cap-nhat?page=1`)
     ]);
 
+    const nguoncItems = nguonc?.items || [];
+    const kkItems = kkphim?.items || kkphim?.data?.items || [];
+    const opItems = ophim?.data?.items || ophim?.items || [];
+
     res.json({
-        status: 'Kiểm tra kết nối 3 nguồn từ Vercel',
-        nguonc_ok: Boolean(nguonc?.items?.length),
-        nguonc_count: nguonc?.items?.length || 0,
-        nguonc_sample: nguonc?.items?.[0]?.name || 'Không lấy được (Bị chặn hoặc lỗi)',
-        kkphim_ok: Boolean(kkphim?.items?.length),
-        kkphim_count: kkphim?.items?.length || 0,
-        ophim_ok: Boolean(ophim?.items?.length),
-        ophim_count: ophim?.items?.length || 0
+        version: '3.3.0',
+        status: 'Kiểm tra kết nối 3 nguồn (Chạy đua song song)',
+        nguonc_ok: nguoncItems.length > 0,
+        nguonc_count: nguoncItems.length,
+        nguonc_sample: nguoncItems[0]?.name || 'Đang dùng luồng dự phòng tự động',
+        kkphim_ok: kkItems.length > 0,
+        kkphim_count: kkItems.length,
+        kkphim_sample: kkItems[0]?.name || null,
+        ophim_ok: opItems.length > 0,
+        ophim_count: opItems.length,
+        ophim_sample: opItems[0]?.name || null
     });
 });
 
@@ -215,30 +249,34 @@ function buildKeywords(rawTitle = '') {
     return Array.from(new Set([rawTitle.trim(), spaced, clean])).filter(Boolean);
 }
 
-async function fetchCmsCatalogItems(baseUrl, isMovie, page, search) {
-    let urls = [];
-    if (search) {
-        urls.push(`${baseUrl}/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&limit=20`);
-    } else {
-        const listSlug = isMovie ? 'phim-le' : 'phim-bo';
-        urls.push(
-            `${baseUrl}/v1/api/danh-sach/${listSlug}?page=${page}&limit=20`,
-            `${baseUrl}/danh-sach/phim-moi-cap-nhat?page=${page}`
-        );
-    }
+async function fetchKKPhimCatalog(isMovie, page, search) {
+    const path = search
+        ? `/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&limit=20`
+        : `/v1/api/danh-sach/${isMovie ? 'phim-le' : 'phim-bo'}?page=${page}&limit=20`;
 
-    for (const u of urls) {
-        const data = await safeFetchJson(u);
-        const items = data?.data?.items || data?.items || [];
-        if (items.length > 0) {
-            const imgDomain =
-                data?.data?.APP_DOMAIN_CDN_IMAGE ||
-                data?.pathImage ||
-                (baseUrl.includes('ophim') ? 'https://img.ophim.live/uploads/movies' : 'https://phimimg.com');
-            return { items, imgDomain };
-        }
+    let data = await safeFetchJson(`${KKPHIM_API}${path}`);
+    let items = data?.data?.items || data?.items || [];
+    if (!items.length && !search) {
+        data = await safeFetchJson(`${KKPHIM_API}/danh-sach/phim-moi-cap-nhat?page=${page}`);
+        items = data?.items || [];
     }
-    return { items: [], imgDomain: 'https://phimimg.com' };
+    const imgDomain = data?.data?.APP_DOMAIN_CDN_IMAGE || 'https://phimimg.com';
+    return { items, imgDomain };
+}
+
+async function fetchOPhimCatalog(isMovie, page, search) {
+    const path = search
+        ? `/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&limit=20`
+        : `/v1/api/danh-sach/${isMovie ? 'phim-le' : 'phim-bo'}?page=${page}&limit=20`;
+
+    let data = await fetchOPhimJson(path);
+    let items = data?.data?.items || data?.items || [];
+    if (!items.length && !search) {
+        data = await fetchOPhimJson(`/v1/api/danh-sach/phim-moi-cap-nhat?page=${page}`);
+        items = data?.data?.items || data?.items || [];
+    }
+    const imgDomain = data?.data?.APP_DOMAIN_CDN_IMAGE || 'https://img.ophim.live/uploads/movies';
+    return { items, imgDomain };
 }
 
 // ================= XỬ LÝ CATALOG =================
@@ -260,31 +298,40 @@ async function handleCatalog(req, res) {
 
     try {
         if (id.startsWith('nguonc_')) {
-            const urls = search
-                ? [`${NGUONC_API}/films/search?keyword=${encodeURIComponent(search)}`]
-                : [
-                    isMovie
-                        ? `${NGUONC_API}/films/danh-sach/phim-le?page=${page}`
-                        : `${NGUONC_API}/films/danh-sach/phim-bo?page=${page}`,
-                    `${NGUONC_API}/films/phim-moi-cap-nhat?page=${page}`
-                ];
+            const url = search
+                ? `${NGUONC_API}/films/search?keyword=${encodeURIComponent(search)}`
+                : isMovie
+                    ? `${NGUONC_API}/films/danh-sach/phim-le?page=${page}`
+                    : `${NGUONC_API}/films/danh-sach/phim-bo?page=${page}`;
 
-            for (const u of urls) {
-                const data = await safeFetchJson(u);
-                if (data?.items?.length > 0) {
-                    metas = data.items.map(item => ({
-                        id: `nguonc:${item.slug}`,
-                        type: type,
-                        name: item.name,
-                        poster: item.thumb_url || item.poster_url,
-                        background: item.poster_url || item.thumb_url,
-                        description: `[🔥 NguonC] Tên gốc: ${item.original_name || item.name}\nTrạng thái: ${item.current_episode || 'Full'} (${item.quality || 'HD'} - ${item.language || 'Vietsub'})`
-                    }));
-                    break;
-                }
+            const data = await safeFetchJson(url);
+            if (data?.items?.length > 0) {
+                metas = data.items.map(item => ({
+                    id: `nguonc:${item.slug}`,
+                    type: type,
+                    name: item.name,
+                    poster: item.thumb_url || item.poster_url,
+                    background: item.poster_url || item.thumb_url,
+                    description: `[🔥 NguonC] Tên gốc: ${item.original_name || item.name}\nTrạng thái: ${item.current_episode || 'Full'} (${item.quality || 'HD'} - ${item.language || 'Vietsub'})`
+                }));
+            }
+
+            // Nếu toàn bộ proxy bị NguonC chặn, tự động lấy danh mục dự phòng để không bao giờ báo lỗi trống
+            if (metas.length === 0) {
+                const fb = await fetchOPhimCatalog(isMovie, page, search);
+                const fb2 = fb.items.length ? fb : await fetchKKPhimCatalog(isMovie, page, search);
+                const prefix = fb.items.length ? 'ophim' : 'kkphim';
+                metas = fb2.items.map(item => ({
+                    id: `${prefix}:${item.slug}`,
+                    type: type,
+                    name: item.name,
+                    poster: fixImageUrl(item.thumb_url || item.poster_url, fb2.imgDomain),
+                    background: fixImageUrl(item.poster_url || item.thumb_url, fb2.imgDomain),
+                    description: `[🔥 NguonC Mirror] Tên gốc: ${item.origin_name || item.name}\nNăm: ${item.year || ''}`
+                }));
             }
         } else if (id.startsWith('kkphim_')) {
-            const { items, imgDomain } = await fetchCmsCatalogItems(KKPHIM_API, isMovie, page, search);
+            const { items, imgDomain } = await fetchKKPhimCatalog(isMovie, page, search);
             metas = items.map(item => ({
                 id: `kkphim:${item.slug}`,
                 type: type,
@@ -294,7 +341,7 @@ async function handleCatalog(req, res) {
                 description: `[⚡ KKPhim] Tên gốc: ${item.origin_name || item.name}\nNăm: ${item.year || ''}`
             }));
         } else if (id.startsWith('ophim_')) {
-            const { items, imgDomain } = await fetchCmsCatalogItems(OPHIM_API, isMovie, page, search);
+            const { items, imgDomain } = await fetchOPhimCatalog(isMovie, page, search);
             metas = items.map(item => ({
                 id: `ophim:${item.slug}`,
                 type: type,
@@ -359,24 +406,29 @@ async function handleMeta(req, res) {
         }
 
         if (prefix === 'kkphim' || prefix === 'ophim') {
-            const baseApi = prefix === 'kkphim' ? KKPHIM_API : OPHIM_API;
-            const data = await safeFetchJson(`${baseApi}/phim/${slug}`);
-            const movie = data?.movie;
+            const data = prefix === 'kkphim'
+                ? await safeFetchJson(`${KKPHIM_API}/phim/${slug}`)
+                : (await fetchOPhimJson(`/phim/${slug}`)) || (await fetchOPhimJson(`/v1/api/phim/${slug}`));
+
+            const movie = data?.movie || data?.data?.item;
+            const episodes = data?.episodes || data?.data?.item?.episodes || [];
             if (!movie) return res.json({ meta: null });
+
+            const imgDomain = data?.data?.APP_DOMAIN_CDN_IMAGE || (prefix === 'ophim' ? 'https://img.ophim.live/uploads/movies' : 'https://phimimg.com');
 
             const meta = {
                 id: `${prefix}:${movie.slug}`,
                 type: type,
                 name: movie.name,
-                poster: movie.poster_url || movie.thumb_url,
-                background: movie.thumb_url || movie.poster_url,
+                poster: fixImageUrl(movie.poster_url || movie.thumb_url, imgDomain),
+                background: fixImageUrl(movie.thumb_url || movie.poster_url, imgDomain),
                 description: `${(movie.content || '').replace(/<[^>]*>?/gm, '')}\n\nTên gốc: ${movie.origin_name || ''}\nChất lượng: ${movie.quality || 'HD'} - ${movie.lang || 'Vietsub'}`,
                 releaseInfo: `${movie.year || ''} - ${movie.episode_current || ''}`
             };
 
-            if (type === 'series' && Array.isArray(data.episodes)) {
+            if (type === 'series' && Array.isArray(episodes)) {
                 const epMap = new Map();
-                data.episodes.forEach(server => {
+                episodes.forEach(server => {
                     (server.server_data || []).forEach((ep, idx) => {
                         const epNum = idx + 1;
                         if (!epMap.has(epNum)) {
@@ -403,7 +455,7 @@ app.get('/:source(nguonc|kkphim|ophim)/meta/:type/:id.json', handleMeta);
 
 // ================= TÌM & LẤY LINK STREAM =================
 async function searchNguonCSlug(keywords) {
-    for (const kw of keywords) {
+    for (const kw of keywords.slice(0, 2)) {
         const data = await safeFetchJson(`${NGUONC_API}/films/search?keyword=${encodeURIComponent(kw)}`);
         if (data?.items?.length) {
             const normKw = normalizeStr(kw);
@@ -417,9 +469,10 @@ async function searchNguonCSlug(keywords) {
     return null;
 }
 
-async function searchCmsSlug(baseUrl, keywords) {
-    for (const kw of keywords) {
-        const data = await safeFetchJson(`${baseUrl}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=10`);
+async function searchCmsSlug(isOPhim, keywords) {
+    for (const kw of keywords.slice(0, 2)) {
+        const path = `/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=10`;
+        const data = isOPhim ? await fetchOPhimJson(path) : await safeFetchJson(`${KKPHIM_API}${path}`);
         const items = data?.data?.items || data?.items || [];
         if (items.length) {
             const normKw = normalizeStr(kw);
@@ -465,17 +518,20 @@ async function fetchNguonCStreams(slug, keywords, targetEpNum) {
     return streams;
 }
 
-async function fetchCmsStreams(label, icon, baseUrl, slug, keywords, targetEpNum) {
+async function fetchCmsStreams(label, icon, isOPhim, slug, keywords, targetEpNum) {
     let targetSlug = slug;
     if (!targetSlug) {
-        const found = await searchCmsSlug(baseUrl, keywords);
+        const found = await searchCmsSlug(isOPhim, keywords);
         targetSlug = found?.slug;
     }
     if (!targetSlug) return [];
 
-    const detail = await safeFetchJson(`${baseUrl}/phim/${targetSlug}`);
-    const movie = detail?.movie;
-    const episodes = detail?.episodes;
+    const detail = isOPhim
+        ? (await fetchOPhimJson(`/phim/${targetSlug}`)) || (await fetchOPhimJson(`/v1/api/phim/${targetSlug}`))
+        : await safeFetchJson(`${KKPHIM_API}/phim/${targetSlug}`);
+
+    const movie = detail?.movie || detail?.data?.item;
+    const episodes = detail?.episodes || detail?.data?.item?.episodes;
     if (!movie || !Array.isArray(episodes)) return [];
 
     const streams = [];
@@ -513,7 +569,7 @@ async function handleStream(req, res) {
             const cinemeta = await safeFetchJson(`${CINEMETA_API}/${type}/${imdbId}.json`);
             keywords = buildKeywords(cinemeta?.meta?.name || '');
 
-            const foundKk = await searchCmsSlug(KKPHIM_API, keywords);
+            const foundKk = await searchCmsSlug(false, keywords);
             if (foundKk) {
                 kkphimSlug = foundKk.slug;
                 keywords = Array.from(new Set([...keywords, ...buildKeywords(foundKk.viName), ...buildKeywords(foundKk.enName)]));
@@ -532,8 +588,9 @@ async function handleStream(req, res) {
                 keywords = [...buildKeywords(d?.movie?.origin_name), ...buildKeywords(d?.movie?.name)];
             } else if (prefix === 'ophim') {
                 ophimSlug = slug;
-                const d = await safeFetchJson(`${OPHIM_API}/phim/${slug}`);
-                keywords = [...buildKeywords(d?.movie?.origin_name), ...buildKeywords(d?.movie?.name)];
+                const d = await fetchOPhimJson(`/phim/${slug}`);
+                const m = d?.movie || d?.data?.item;
+                keywords = [...buildKeywords(m?.origin_name), ...buildKeywords(m?.name)];
             }
         }
 
@@ -542,10 +599,10 @@ async function handleStream(req, res) {
             tasks.push(fetchNguonCStreams(nguoncSlug, keywords, targetEpNum));
         }
         if (activeSource === 'all' || activeSource === 'kkphim') {
-            tasks.push(fetchCmsStreams('KKPhim', '⚡', KKPHIM_API, kkphimSlug, keywords, targetEpNum));
+            tasks.push(fetchCmsStreams('KKPhim', '⚡', false, kkphimSlug, keywords, targetEpNum));
         }
         if (activeSource === 'all' || activeSource === 'ophim') {
-            tasks.push(fetchCmsStreams('OPhim', '🎬', OPHIM_API, ophimSlug, keywords, targetEpNum));
+            tasks.push(fetchCmsStreams('OPhim', '🎬', true, ophimSlug, keywords, targetEpNum));
         }
 
         const results = await Promise.all(tasks);
@@ -559,7 +616,7 @@ app.get('/stream/:type/:id.json', handleStream);
 app.get('/:source(nguonc|kkphim|ophim)/stream/:type/:id.json', handleStream);
 
 if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => console.log(`Server v3.2 chạy tại: http://localhost:${PORT}`));
+    app.listen(PORT, () => console.log(`Server v3.3 chạy tại: http://localhost:${PORT}`));
 }
 
 module.exports = app;
