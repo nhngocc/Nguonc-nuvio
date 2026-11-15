@@ -79,7 +79,6 @@ async function fetchNguonC(endpoint) {
     return await fetchJson(`${NGUONC_API}${endpoint}`);
 }
 
-// Tạo các biến thể từ khóa để bộ tìm kiếm của NguonC dễ bắt trúng nhất
 function generateSearchKeywords(rawTitle = '') {
     if (!rawTitle) return [];
     const spaced = rawTitle.replace(/([a-z])([A-Z])/g, '$1 $2').trim();
@@ -96,7 +95,6 @@ function generateSearchKeywords(rawTitle = '') {
     ])).filter(k => k && k.length >= 2);
 }
 
-// Dịch mã IMDb / TMDB / Kitsu sang danh sách từ khóa (Cả Tiếng Anh + Tiếng Việt)
 async function resolveKeywordsAndEpisode(type, rawId) {
     const parts = rawId.split(':');
     const prefix = parts[0];
@@ -149,7 +147,6 @@ export default {
             return jsonResponse(manifest);
         }
 
-        // ================= 1. CATALOG =================
         if (pathname.startsWith('/catalog/')) {
             const parts = pathname.replace('/catalog/', '').replace(/\.json$/, '').split('/');
             const type = parts[0];
@@ -184,7 +181,6 @@ export default {
             return jsonResponse({ metas });
         }
 
-        // ================= 2. META (SỬA LỖI BẤM XEM TỪ CATALOG) =================
         if (pathname.startsWith('/meta/')) {
             const clean = pathname.replace('/meta/', '').replace(/\.json$/, '');
             const slashIdx = clean.indexOf('/');
@@ -200,7 +196,6 @@ export default {
             const movie = data?.movie;
             if (!movie) return jsonResponse({ meta: null });
 
-            // Gộp tất cả các tập từ các server của NguonC
             const epMap = new Map();
             (movie.episodes || []).forEach(server => {
                 (server.items || []).forEach((ep, idx) => {
@@ -228,7 +223,6 @@ export default {
                 releaseInfo: movie.current_episode || ''
             };
 
-            // Nếu là Phim Bộ (hoặc Phim Lẻ có nhiều phần), trả về danh sách tập; nếu là Phim Lẻ 1 tập, gắn defaultVideoId để Nuvio gọi thẳng Stream
             if (type === 'series' || videos.length > 1) {
                 meta.videos = videos.length > 0 ? videos : [{
                     id: `nguonc:${movie.slug}:1`,
@@ -245,7 +239,6 @@ export default {
             return jsonResponse({ meta });
         }
 
-        // ================= 3. STREAM (LẤY LINK M3U8 TỪ NGUONC) =================
         if (pathname.startsWith('/stream/')) {
             const clean = pathname.replace('/stream/', '').replace(/\.json$/, '');
             const slashIdx = clean.indexOf('/');
@@ -259,13 +252,10 @@ export default {
             let slug = null;
             let targetEpNum = null;
 
-            // Trường hợp 1: Bấm trực tiếp từ Catalog của NguonC (VD: nguonc:phai-song hoặc nguonc:phai-song:1)
             if (prefix === 'nguonc') {
                 slug = parts[1];
                 targetEpNum = parts[2] ? parseInt(parts[2]) : 1;
-            }
-            // Trường hợp 2: Bấm từ phim ngoài màn hình chính Nuvio (tt..., tmdb:..., kitsu:...)
-            else {
+            } else {
                 const resolved = await resolveKeywordsAndEpisode(type, rawId);
                 targetEpNum = resolved.epNum;
 
